@@ -37,20 +37,43 @@
       </div>
       <button id="btn-start" class="primary-btn">Start Coast-Down</button>
       <p class="hint">Get up to speed, tap Start, then stop pedaling and coast.</p>
+      <p class="hint" id="gps-status"></p>
     </section>
 
     <!-- Recording Screen -->
     <section id="recording-screen" class="screen">
+      <div class="phase-indicator" id="phase-indicator">
+        <span class="phase-dot" id="phase-dot"></span>
+        <span id="phase-text">Waiting for GPS…</span>
+      </div>
+
       <div class="live-display">
         <div class="big-number" id="live-speed">0.0</div>
         <div class="unit">km/h</div>
       </div>
+
+      <div class="live-metrics">
+        <div class="metric">
+          <div class="metric-value" id="live-accel">0.0</div>
+          <div class="metric-label">m/s² accel</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value" id="live-slope">0.0</div>
+          <div class="metric-label">% slope</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value" id="live-altitude">—</div>
+          <div class="metric-label">m altitude</div>
+        </div>
+      </div>
+
       <div class="stats-row">
         <div><span id="elapsed">0</span>s elapsed</div>
         <div><span id="samples">0</span> samples</div>
       </div>
-      <div class="status" id="rec-status">Recording…</div>
-      <button id="btn-stop" class="danger-btn">Stop</button>
+
+      <div class="status" id="rec-status">Waiting for movement…</div>
+      <button id="btn-stop" class="danger-btn">Stop &amp; Analyze</button>
     </section>
 
     <!-- Results Screen -->
@@ -73,6 +96,14 @@
           <div class="result-item">
             <div class="result-label">Start → End</div>
             <div class="result-value" id="res-speeds">—</div>
+          </div>
+          <div class="result-item">
+            <div class="result-label">Avg Slope</div>
+            <div class="result-value" id="res-slope">—</div>
+          </div>
+          <div class="result-item">
+            <div class="result-label">Elev Δ</div>
+            <div class="result-value" id="res-elev">—</div>
           </div>
         </div>
       </div>

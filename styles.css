@@ -8,6 +8,8 @@
   --text: #eee;
   --muted: #8899aa;
   --green: #00c897;
+  --orange: #f5a623;
+  --blue: #4fc3f7;
 }
 
 body {
@@ -69,10 +71,51 @@ label input {
 
 .hint { text-align: center; color: var(--muted); font-size: 0.8rem; margin-top: 8px; }
 
+/* Phase indicator */
+.phase-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-radius: 20px;
+  background: var(--card);
+  margin-bottom: 16px;
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+.phase-dot {
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  background: var(--muted);
+  animation: pulse 1.2s infinite;
+}
+.phase-dot.accelerating { background: var(--orange); }
+.phase-dot.coasting { background: var(--green); }
+.phase-dot.stopped { background: var(--highlight); animation: none; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
 /* Recording screen */
-.live-display { text-align: center; margin: 40px 0 16px; }
+.live-display { text-align: center; margin: 20px 0 12px; }
 .big-number { font-size: 4rem; font-weight: 700; font-variant-numeric: tabular-nums; }
 .unit { color: var(--muted); font-size: 1rem; }
+
+.live-metrics {
+  display: flex;
+  justify-content: space-around;
+  background: var(--card);
+  border-radius: 12px;
+  padding: 14px 8px;
+  margin-bottom: 16px;
+}
+.metric { text-align: center; }
+.metric-value { font-size: 1.2rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.metric-label { font-size: 0.7rem; color: var(--muted); margin-top: 2px; }
+
 .stats-row {
   display: flex; justify-content: center; gap: 24px;
   color: var(--muted); font-size: 0.9rem; margin-bottom: 16px;
@@ -94,3 +137,5 @@ canvas {
 
 .btn-row { display: flex; gap: 12px; }
 .btn-row button { flex: 1; }
+
+#gps-status { color: var(--orange); font-size: 0.8rem; min-height: 1.2em; }
