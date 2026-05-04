@@ -280,6 +280,16 @@ function analyze(coastData) {
     $('res-elev').textContent = 'N/A';
   }
 
+  // Save to history
+  addToHistory({
+    date: new Date().toLocaleString(),
+    crr: Crr.toFixed(5),
+    cda: CdA.toFixed(4),
+    duration: duration.toFixed(1),
+    speeds: startSpeed + '→' + endSpeed,
+    slope: (avgSlope * 100).toFixed(1)
+  });
+
   drawChart(coastData, Crr, CdA, m, rho, theta);
 }
 
@@ -372,15 +382,28 @@ function exportCSV() {
 }
 
 // ── Event Wiring ──
-$('btn-start').addEventListener('click', async () => {
+$('btn-gps').addEventListener('click', async () => {
   try {
+    $('gps-status').textContent = 'Requesting GPS permission…';
+    $('btn-gps').disabled = true;
     await requestGPS();
-    showScreen('recording-screen');
-    beginRecording();
+    $('btn-gps').textContent = '📍 GPS Ready ✓';
+    $('btn-gps').style.background = 'var(--green)';
+    $('btn-gps').style.color = '#111';
+    $('btn-start').disabled = false;
+    $('gps-status').textContent = 'GPS active — you can start when ready.';
+    $('gps-status').style.color = 'var(--green)';
   } catch (e) {
+    $('btn-gps').disabled = false;
     $('gps-status').textContent = 'GPS failed: ' + e.message;
+    $('gps-status').style.color = 'var(--highlight)';
     alert('GPS permission is required.\n\n' + e.message + '\n\nMake sure location services are enabled and you are using HTTPS.');
   }
+});
+
+$('btn-start').addEventListener('click', () => {
+  showScreen('recording-screen');
+  beginRecording();
 });
 
 $('btn-stop').addEventListener('click', stopRecording);
@@ -390,7 +413,171 @@ $('btn-reset').addEventListener('click', () => {
   showScreen('setup-screen');
 });
 
+// ── Power Calculator ──
+let pwrCrr = 0, pwrCdA = 0;
+
+function openPowerCalc(crr, cda, source) {
+  pwrCrr = parseFloat(crr);
+  pwrCdA = parseFloat(cda);
+  $('pwr-source').textContent = source;
+  $('pwr-crr').textContent = crr;
+  $('pwr-cda').textContent = cda + ' m²';
+  updatePower();
+  showScreen('power-screen');
+}
+
+function calcPower(speedKmh, slopePct, windKmh) {
+  const m = parseFloat($('mass').value) || 80;
+  const rho = parseFloat($('air-density').value) || 1.225;
+  const g = 9.81;
+
+  const v = speedKmh / 3.6; // ground speed m/s
+  const vWind = windKmh / 3.6; // headwind m/s
+  const vAir = v + vWind; // air speed
+
+  const slope = slopePct / 100;
+  const theta = Math.atan(slope);
+
+  // Rolling resistance power: Crr * m * g * cos(θ) * v
+  const pRoll = pwrCrr * m * g * Math.cos(theta) * v;
+
+  // Aerodynamic drag power: 0.5 * ρ * CdA * vAir² * v
+  // (force uses air speed, power = force * ground speed)
+  const pAero = 0.5 * rho * pwrCdA * vAir * vAir * v;
+
+  // Gravity power: m * g * sin(θ) * v
+  const pGrav = m * g * Math.sin(theta) * v;
+
+  return { pRoll, pAero, pGrav, total: pRoll + pAero + pGrav };
+}
+
+function updatePower() {
+  const speed = parseFloat($('pwr-speed').value);
+  const slope = parseFloat($('pwr-slope').value);
+  const wind = parseFloat($('pwr-wind').value);
+
+  $('pwr-speed-val').textContent = speed.toFixed(1) + ' km/h';
+  $('pwr-slope-val').textContent = slope.toFixed(1) + ' %';
+  $('pwr-wind-val').textContent = wind.toFixed(1) + ' km/h';
+
+  const { pRoll, pAero, pGrav, total } = calcPower(speed, slope, wind);
+
+  $('pwr-watts').textContent = Math.round(Math.max(0, total));
+  $('pwr-w-roll').textContent = Math.round(pRoll) + ' W';
+  $('pwr-w-aero').textContent = Math.round(pAero) + ' W';
+  $('pwr-w-grav').textContent = Math.round(pGrav) + ' W';
+
+  // Bar widths proportional to total
+  const maxP = Math.max(1, Math.abs(pRoll) + Math.abs(pAero) + Math.abs(pGrav));
+  $('pwr-bar-roll').style.width = Math.round((Math.abs(pRoll) / maxP) * 100) + '%';
+  $('pwr-bar-aero').style.width = Math.round((Math.abs(pAero) / maxP) * 100) + '%';
+  $('pwr-bar-grav').style.width = Math.round((Math.abs(pGrav) / maxP) * 100) + '%';
+
+  // Color total based on value
+  const watts = $('pwr-watts');
+  if (total > 300) watts.style.color = 'var(--highlight)';
+  else if (total > 150) watts.style.color = 'var(--orange)';
+  else watts.style.color = 'var(--green)';
+}
+
+$('pwr-speed').addEventListener('input', updatePower);
+$('pwr-slope').addEventListener('input', updatePower);
+$('pwr-wind').addEventListener('input', updatePower);
+
+// Open power calc from results screen (uses latest result)
+$('btn-power').addEventListener('click', () => {
+  const history = loadHistory();
+  if (history.length > 0) {
+    const h = history[0];
+    openPowerCalc(h.crr, h.cda, h.date);
+  }
+});
+
+$('btn-pwr-back').addEventListener('click', () => {
+  showScreen('setup-screen');
+});
+
 // ── Service Worker ──
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
+
+// ── History (localStorage) ──
+const HISTORY_KEY = 'coastdown_history';
+
+function loadHistory() {
+  try {
+    return JSON.parse(localStorage.getItem(HISTORY_KEY)) || [];
+  } catch { return []; }
+}
+
+function saveHistory(history) {
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+}
+
+function addToHistory(result) {
+  const history = loadHistory();
+  history.unshift(result);
+  // Keep last 50 entries
+  if (history.length > 50) history.length = 50;
+  saveHistory(history);
+  renderHistory();
+}
+
+function deleteFromHistory(index) {
+  const history = loadHistory();
+  history.splice(index, 1);
+  saveHistory(history);
+  renderHistory();
+}
+
+function renderHistory() {
+  const history = loadHistory();
+  const card = $('history-card');
+  const list = $('history-list');
+
+  if (history.length === 0) {
+    card.style.display = 'none';
+    return;
+  }
+
+  card.style.display = 'block';
+  list.innerHTML = history.map((h, i) => `
+    <div class="history-entry">
+      <div>
+        <div class="history-date">${h.date}</div>
+        <div class="history-values">Crr ${h.crr} · CdA ${h.cda} m²</div>
+      </div>
+      <div>
+        <div class="history-meta">${h.speeds} km/h<br>${h.duration}s · ${h.slope}% slope</div>
+        <button class="history-pwr" data-index="${i}" aria-label="Power calculator" title="Power Calc">⚡</button>
+        <button class="history-delete" data-index="${i}" aria-label="Delete entry">×</button>
+      </div>
+    </div>
+  `).join('');
+
+  // Wire delete buttons
+  list.querySelectorAll('.history-delete').forEach(btn => {
+    btn.addEventListener('click', () => {
+      deleteFromHistory(parseInt(btn.dataset.index));
+    });
+  });
+
+  // Wire power calc buttons
+  list.querySelectorAll('.history-pwr').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const h = history[parseInt(btn.dataset.index)];
+      openPowerCalc(h.crr, h.cda, h.date);
+    });
+  });
+}
+
+$('btn-clear-history').addEventListener('click', () => {
+  if (confirm('Delete all saved tests?')) {
+    localStorage.removeItem(HISTORY_KEY);
+    renderHistory();
+  }
+});
+
+// Load history on startup
+renderHistory();
