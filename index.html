@@ -37,6 +37,7 @@
       </div>
       <button id="btn-gps" class="secondary-btn">📍 Enable GPS</button>
       <button id="btn-start" class="primary-btn" disabled>Start Coast-Down</button>
+      <button id="btn-live-watts" class="secondary-btn">⚡ Live Watts</button>
       <p class="hint">Tap "Enable GPS" first, then get up to speed and tap Start.</p>
       <p class="hint" id="gps-status"></p>
 
@@ -88,6 +89,10 @@
     <section id="results-screen" class="screen">
       <div class="card">
         <h2>Results</h2>
+        <label>
+          Name this test
+          <input type="text" id="res-name" placeholder="e.g. 1psi front wheel, aero position…">
+        </label>
         <div class="result-grid">
           <div class="result-item">
             <div class="result-label">Crr</div>
@@ -117,10 +122,10 @@
       </div>
       <canvas id="chart" width="360" height="220"></canvas>
       <div class="btn-row">
-        <button id="btn-power" class="secondary-btn">⚡ Power Calc</button>
+        <button id="btn-save-result" class="primary-btn">💾 Save</button>
         <button id="btn-export" class="secondary-btn">Export CSV</button>
       </div>
-      <button id="btn-reset" class="primary-btn">New Test</button>
+      <button id="btn-reset" class="primary-btn" style="margin-top:8px;">New Test</button>
     </section>
 
     <!-- Power Calculator Screen -->
@@ -183,6 +188,70 @@
       </div>
 
       <button id="btn-pwr-back" class="secondary-btn">← Back</button>
+    </section>
+
+    <!-- Live Watts Screen -->
+    <section id="live-watts-screen" class="screen">
+      <div class="card">
+        <h2>⚡ Live Watt Estimation</h2>
+        <label>
+          Select coastdown profile
+          <select id="lw-profile"></select>
+        </label>
+        <div class="pwr-params" style="margin-top:12px;">
+          <div class="pwr-param">
+            <span class="pwr-param-label">Crr</span>
+            <span class="pwr-param-value" id="lw-crr">—</span>
+          </div>
+          <div class="pwr-param">
+            <span class="pwr-param-label">CdA</span>
+            <span class="pwr-param-value" id="lw-cda">—</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="live-display">
+        <div class="big-number" id="lw-watts">0</div>
+        <div class="unit">Watts</div>
+      </div>
+
+      <div class="live-metrics">
+        <div class="metric">
+          <div class="metric-value" id="lw-speed">0.0</div>
+          <div class="metric-label">km/h</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value" id="lw-slope">0.0</div>
+          <div class="metric-label">% slope</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value" id="lw-alt">—</div>
+          <div class="metric-label">m alt</div>
+        </div>
+      </div>
+
+      <div class="card pwr-result-card">
+        <div class="pwr-breakdown">
+          <div class="pwr-break-item">
+            <div class="pwr-break-bar" id="lw-bar-roll"></div>
+            <div class="pwr-break-label">Rolling</div>
+            <div class="pwr-break-value" id="lw-w-roll">0 W</div>
+          </div>
+          <div class="pwr-break-item">
+            <div class="pwr-break-bar" id="lw-bar-aero"></div>
+            <div class="pwr-break-label">Aero</div>
+            <div class="pwr-break-value" id="lw-w-aero">0 W</div>
+          </div>
+          <div class="pwr-break-item">
+            <div class="pwr-break-bar" id="lw-bar-grav"></div>
+            <div class="pwr-break-label">Gravity</div>
+            <div class="pwr-break-value" id="lw-w-grav">0 W</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="status" id="lw-status">Waiting for GPS speed…</div>
+      <button id="btn-lw-stop" class="danger-btn">Stop</button>
     </section>
   </div>
 

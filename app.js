@@ -286,15 +286,14 @@ function analyze(coastData) {
     $('res-elev').textContent = 'N/A';
   }
 
-  // Save to history
-  addToHistory({
-    date: new Date().toLocaleString(),
+  // Save to history (deferred until user names it)
+  window._pendingResult = {
     crr: Crr.toFixed(5),
     cda: CdA.toFixed(4),
     duration: duration.toFixed(1),
     speeds: startSpeed + '→' + endSpeed,
     slope: (avgSlope * 100).toFixed(1)
-  });
+  };
 
   drawChart(coastData, Crr, CdA, m, rho, theta);
 }
@@ -421,6 +420,21 @@ $('btn-reset').addEventListener('click', () => {
   showScreen('setup-screen');
 });
 
+// Save result with name
+$('btn-save-result').addEventListener('click', () => {
+  if (!window._pendingResult) return;
+  const name = $('res-name').value.trim() || 'Unnamed test';
+  const result = {
+    ...window._pendingResult,
+    name,
+    date: new Date().toLocaleString()
+  };
+  addToHistory(result);
+  $('res-name').value = '';
+  window._pendingResult = null;
+  alert('Saved: ' + name);
+});
+
 // ── Power Calculator ──
 let pwrCrr = 0, pwrCdA = 0;
 
@@ -492,15 +506,6 @@ $('pwr-speed').addEventListener('input', updatePower);
 $('pwr-slope').addEventListener('input', updatePower);
 $('pwr-wind').addEventListener('input', updatePower);
 
-// Open power calc from results screen (uses latest result)
-$('btn-power').addEventListener('click', () => {
-  const history = loadHistory();
-  if (history.length > 0) {
-    const h = history[0];
-    openPowerCalc(h.crr, h.cda, h.date);
-  }
-});
-
 $('btn-pwr-back').addEventListener('click', () => {
   showScreen('setup-screen');
 });
@@ -509,6 +514,150 @@ $('btn-pwr-back').addEventListener('click', () => {
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
+
+// ── Live Watts ──
+let lwWatchId = null;
+let lwPoints = []; // for slope calculation
+
+function populateProfileSelect() {
+  const sel = $('lw-profile');
+  const history = loadHistory();
+  sel.innerHTML = '';
+  if (history.length === 0) {
+    sel.innerHTML = '<option value="">No profiles — run a coastdown first</option>';
+    return;
+  }
+  history.forEach((h, i) => {
+    const opt = document.createElement('option');
+    opt.value = i;
+    opt.textContent = (h.name || 'Unnamed') + ' (Crr ' + h.crr + ', CdA ' + h.cda + ')';
+    sel.appendChild(opt);
+  });
+  updateLwProfile();
+}
+
+function updateLwProfile() {
+  const history = loadHistory();
+  const idx = parseInt($('lw-profile').value);
+  if (isNaN(idx) || !history[idx]) return;
+  const h = history[idx];
+  $('lw-crr').textContent = h.crr;
+  $('lw-cda').textContent = h.cda + ' m²';
+}
+
+$('lw-profile').addEventListener('change', updateLwProfile);
+
+$('btn-live-watts').addEventListener('click', async () => {
+  const history = loadHistory();
+  if (history.length === 0) {
+    alert('No coastdown profiles saved yet. Run a coastdown test first.');
+    return;
+  }
+
+  // Ensure GPS is ready
+  try {
+    await requestGPS();
+  } catch (e) {
+    alert('GPS required for live watts.\n' + e.message);
+    return;
+  }
+
+  populateProfileSelect();
+  showScreen('live-watts-screen');
+  startLiveWatts();
+});
+
+function startLiveWatts() {
+  lwPoints = [];
+  $('lw-status').textContent = 'Waiting for GPS speed…';
+  $('lw-status').style.color = 'var(--green)';
+
+  lwWatchId = navigator.geolocation.watchPosition(
+    pos => {
+      const speed = pos.coords.speed;
+      const alt = pos.coords.altitude;
+      const lat = pos.coords.latitude;
+      const lon = pos.coords.longitude;
+
+      if (speed == null || speed < 0) return;
+
+      lwPoints.push({ alt, lat, lon });
+      // Keep last 10 points for slope
+      if (lwPoints.length > 10) lwPoints.shift();
+
+      const speedKmh = speed * 3.6;
+      $('lw-speed').textContent = speedKmh.toFixed(1);
+      if (alt != null) $('lw-alt').textContent = alt.toFixed(0);
+
+      // Calculate slope from recent points
+      let slopePct = 0;
+      if (lwPoints.length >= 2) {
+        const first = lwPoints[0];
+        const last = lwPoints[lwPoints.length - 1];
+        if (first.alt != null && last.alt != null) {
+          const dist = haversine(first.lat, first.lon, last.lat, last.lon);
+          if (dist > 2) {
+            slopePct = ((last.alt - first.alt) / dist) * 100;
+          }
+        }
+      }
+      $('lw-slope').textContent = slopePct.toFixed(1);
+      $('lw-slope').style.color = slopePct > 0.5 ? 'var(--highlight)' : slopePct < -0.5 ? 'var(--blue)' : 'var(--text)';
+
+      // Get selected profile
+      const history = loadHistory();
+      const idx = parseInt($('lw-profile').value);
+      if (isNaN(idx) || !history[idx]) return;
+      const profile = history[idx];
+
+      const m = parseFloat($('mass').value) || 80;
+      const rho = parseFloat($('air-density').value) || 1.225;
+      const g = 9.81;
+      const Crr = parseFloat(profile.crr);
+      const CdA = parseFloat(profile.cda);
+
+      const v = speed; // m/s
+      const slope = slopePct / 100;
+      const theta = Math.atan(slope);
+
+      const pRoll = Crr * m * g * Math.cos(theta) * v;
+      const pAero = 0.5 * rho * CdA * v * v * v;
+      const pGrav = m * g * Math.sin(theta) * v;
+      const total = pRoll + pAero + pGrav;
+
+      $('lw-watts').textContent = Math.round(Math.max(0, total));
+      $('lw-w-roll').textContent = Math.round(pRoll) + ' W';
+      $('lw-w-aero').textContent = Math.round(pAero) + ' W';
+      $('lw-w-grav').textContent = Math.round(pGrav) + ' W';
+
+      const maxP = Math.max(1, Math.abs(pRoll) + Math.abs(pAero) + Math.abs(pGrav));
+      $('lw-bar-roll').style.width = Math.round((Math.abs(pRoll) / maxP) * 100) + '%';
+      $('lw-bar-aero').style.width = Math.round((Math.abs(pAero) / maxP) * 100) + '%';
+      $('lw-bar-grav').style.width = Math.round((Math.abs(pGrav) / maxP) * 100) + '%';
+
+      // Color watts
+      const el = $('lw-watts');
+      if (total > 300) el.style.color = 'var(--highlight)';
+      else if (total > 150) el.style.color = 'var(--orange)';
+      else el.style.color = 'var(--green)';
+
+      $('lw-status').textContent = 'Live — updating';
+    },
+    err => {
+      $('lw-status').textContent = 'GPS error: ' + err.message;
+      $('lw-status').style.color = 'var(--highlight)';
+    },
+    { enableHighAccuracy: true, maximumAge: 0 }
+  );
+}
+
+function stopLiveWatts() {
+  if (lwWatchId != null) navigator.geolocation.clearWatch(lwWatchId);
+  lwWatchId = null;
+  showScreen('setup-screen');
+}
+
+$('btn-lw-stop').addEventListener('click', stopLiveWatts);
 
 // ── History (localStorage) ──
 const HISTORY_KEY = 'coastdown_history';
@@ -553,6 +702,7 @@ function renderHistory() {
   list.innerHTML = history.map((h, i) => `
     <div class="history-entry">
       <div>
+        <div class="history-name">${h.name || 'Unnamed'}</div>
         <div class="history-date">${h.date}</div>
         <div class="history-values">Crr ${h.crr} · CdA ${h.cda} m²</div>
       </div>
@@ -575,7 +725,7 @@ function renderHistory() {
   list.querySelectorAll('.history-pwr').forEach(btn => {
     btn.addEventListener('click', () => {
       const h = history[parseInt(btn.dataset.index)];
-      openPowerCalc(h.crr, h.cda, h.date);
+      openPowerCalc(h.crr, h.cda, h.name || h.date);
     });
   });
 }
