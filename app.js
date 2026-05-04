@@ -515,6 +515,23 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 
+// ── Connection Status ──
+function updateConnStatus() {
+  const dot = $('conn-dot');
+  const text = $('conn-text');
+  if (navigator.onLine) {
+    dot.className = 'conn-dot online';
+    text.textContent = 'Online — wind & air density available';
+  } else {
+    dot.className = 'conn-dot offline';
+    text.textContent = 'Offline — using manual air density, no wind data';
+  }
+}
+
+window.addEventListener('online', updateConnStatus);
+window.addEventListener('offline', updateConnStatus);
+updateConnStatus();
+
 // ── Live Watts ──
 let lwWatchId = null;
 let lwPoints = []; // for slope calculation

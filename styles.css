@@ -228,3 +228,24 @@ select {
   color: var(--text);
   font-size: 0.9rem;
 }
+
+/* Connection status */
+.conn-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: var(--card);
+  margin-bottom: 16px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.conn-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex-shrink: 0;
+}
+.conn-dot.online { background: var(--green); }
+.conn-dot.offline { background: var(--highlight); }
