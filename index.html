@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#1a1a2e">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icons/icon-192.svg">
+  <title>Bike Coastdown</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>🚴 Bike Coastdown</h1>
+      <p class="subtitle">Measure Crr &amp; CdA from a coast-down test</p>
+    </header>
+
+    <!-- Setup Screen -->
+    <section id="setup-screen" class="screen active">
+      <div class="card">
+        <h2>Rider + Bike Setup</h2>
+        <label>
+          Total mass (rider + bike) kg
+          <input type="number" id="mass" value="80" step="0.1" min="30" max="200">
+        </label>
+        <label>
+          Air density kg/m³
+          <input type="number" id="air-density" value="1.225" step="0.001" min="0.9" max="1.5">
+        </label>
+        <label>
+          Min speed cutoff km/h
+          <input type="number" id="min-speed" value="5" step="1" min="1" max="20">
+        </label>
+      </div>
+      <button id="btn-start" class="primary-btn">Start Coast-Down</button>
+      <p class="hint">Get up to speed, tap Start, then stop pedaling and coast.</p>
+    </section>
+
+    <!-- Recording Screen -->
+    <section id="recording-screen" class="screen">
+      <div class="live-display">
+        <div class="big-number" id="live-speed">0.0</div>
+        <div class="unit">km/h</div>
+      </div>
+      <div class="stats-row">
+        <div><span id="elapsed">0</span>s elapsed</div>
+        <div><span id="samples">0</span> samples</div>
+      </div>
+      <div class="status" id="rec-status">Recording…</div>
+      <button id="btn-stop" class="danger-btn">Stop</button>
+    </section>
+
+    <!-- Results Screen -->
+    <section id="results-screen" class="screen">
+      <div class="card">
+        <h2>Results</h2>
+        <div class="result-grid">
+          <div class="result-item">
+            <div class="result-label">Crr</div>
+            <div class="result-value" id="res-crr">—</div>
+          </div>
+          <div class="result-item">
+            <div class="result-label">CdA (m²)</div>
+            <div class="result-value" id="res-cda">—</div>
+          </div>
+          <div class="result-item">
+            <div class="result-label">Duration</div>
+            <div class="result-value" id="res-duration">—</div>
+          </div>
+          <div class="result-item">
+            <div class="result-label">Start → End</div>
+            <div class="result-value" id="res-speeds">—</div>
+          </div>
+        </div>
+      </div>
+      <canvas id="chart" width="360" height="220"></canvas>
+      <div class="btn-row">
+        <button id="btn-export" class="secondary-btn">Export CSV</button>
+        <button id="btn-reset" class="primary-btn">New Test</button>
+      </div>
+    </section>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

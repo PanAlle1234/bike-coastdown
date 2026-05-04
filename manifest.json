@@ -1,0 +1,13 @@
+{
+  "name": "Bike Coastdown",
+  "short_name": "Coastdown",
+  "description": "Measure rolling resistance (Crr) and aerodynamic drag (CdA) from a bike coast-down test",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#1a1a2e",
+  "theme_color": "#1a1a2e",
+  "orientation": "portrait",
+  "icons": [
+    { "src": "icons/icon-192.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
