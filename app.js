@@ -60,10 +60,16 @@ function requestGPS() {
         resolve(pos);
       },
       err => {
-        $('gps-status').textContent = 'GPS error: ' + err.message;
-        reject(err);
+        let msg = 'Unknown error';
+        switch (err.code) {
+          case 1: msg = 'Permission denied — tap Allow when prompted'; break;
+          case 2: msg = 'Position unavailable — check location services'; break;
+          case 3: msg = 'Timeout — GPS took too long'; break;
+        }
+        $('gps-status').textContent = 'GPS error: ' + msg;
+        reject(new Error(msg));
       },
-      { enableHighAccuracy: true, timeout: 10000 }
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
     );
   });
 }
@@ -383,9 +389,11 @@ function exportCSV() {
 
 // ── Event Wiring ──
 $('btn-gps').addEventListener('click', async () => {
+  $('gps-status').textContent = 'Requesting GPS…';
+  $('gps-status').style.color = 'var(--orange)';
+  $('btn-gps').disabled = true;
+  $('btn-gps').textContent = '📍 Requesting…';
   try {
-    $('gps-status').textContent = 'Requesting GPS permission…';
-    $('btn-gps').disabled = true;
     await requestGPS();
     $('btn-gps').textContent = '📍 GPS Ready ✓';
     $('btn-gps').style.background = 'var(--green)';
@@ -395,9 +403,9 @@ $('btn-gps').addEventListener('click', async () => {
     $('gps-status').style.color = 'var(--green)';
   } catch (e) {
     $('btn-gps').disabled = false;
-    $('gps-status').textContent = 'GPS failed: ' + e.message;
+    $('btn-gps').textContent = '📍 Retry GPS';
+    $('gps-status').textContent = '❌ ' + e.message;
     $('gps-status').style.color = 'var(--highlight)';
-    alert('GPS permission is required.\n\n' + e.message + '\n\nMake sure location services are enabled and you are using HTTPS.');
   }
 });
 
