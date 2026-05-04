@@ -534,10 +534,17 @@ updateConnStatus();
 
 // ── Live Watts ──
 let lwWatchId = null;
-let lwPoints = []; // for slope calculation
-let currentWind = { speed: 0, direction: 0 }; // wind speed km/h, direction degrees (from)
-let currentAirDensity = 1.225; // default, updated from weather
+let lwPoints = []; // { alt, lat, lon, dist }
+let currentWind = { speed: 0, direction: 0 };
+let currentAirDensity = 1.225;
 let windFetchInterval = null;
+let lwFilteredWatts = 0;
+let lwFilteredSlope = 0;
+let lwPowerHistory = []; // { t, w }
+let lwChartRAF = null;
+let deviceHeading = null;
+const EMA_ALPHA_WATTS = 0.15;
+const EMA_ALPHA_SLOPE = 0.2;
 
 async function fetchWind(lat, lon) {
   try {
@@ -546,43 +553,29 @@ async function fetchWind(lat, lon) {
     if (!res.ok) return;
     const data = await res.json();
     if (data.current) {
-      currentWind.speed = data.current.wind_speed_10m || 0; // km/h
-      currentWind.direction = data.current.wind_direction_10m || 0; // degrees, where wind comes FROM
-
-      // Compute air density from temperature, pressure, humidity
-      const tempC = data.current.temperature_2m; // °C
-      const pressHpa = data.current.surface_pressure; // hPa
-      const rh = data.current.relative_humidity_2m; // %
-
+      currentWind.speed = data.current.wind_speed_10m || 0;
+      currentWind.direction = data.current.wind_direction_10m || 0;
+      const tempC = data.current.temperature_2m;
+      const pressHpa = data.current.surface_pressure;
+      const rh = data.current.relative_humidity_2m;
       if (tempC != null && pressHpa != null) {
         currentAirDensity = calcAirDensity(tempC, pressHpa, rh || 50);
-        // Update the input field so all calculations use it
         $('air-density').value = currentAirDensity.toFixed(4);
       }
     }
-  } catch (e) {
-    // Silently fail — values stay at last known
-  }
+  } catch (e) { /* silent */ }
 }
 
-// Air density from temperature, pressure, humidity (ideal gas law with humidity correction)
-// ρ = (Pd / (Rd * T)) + (Pv / (Rv * T))
-// Pd = dry air partial pressure, Pv = water vapor partial pressure
 function calcAirDensity(tempC, pressHpa, relHumidity) {
-  const T = tempC + 273.15; // Kelvin
-  const P = pressHpa * 100; // Pa
-  const Rd = 287.05; // specific gas constant dry air J/(kg·K)
-  const Rv = 461.495; // specific gas constant water vapor J/(kg·K)
-
-  // Saturation vapor pressure (Magnus formula)
-  const es = 611.2 * Math.exp((17.67 * tempC) / (tempC + 243.5)); // Pa
-  const Pv = (relHumidity / 100) * es; // actual vapor pressure
-  const Pd = P - Pv; // dry air pressure
-
+  const T = tempC + 273.15;
+  const P = pressHpa * 100;
+  const Rd = 287.05, Rv = 461.495;
+  const es = 611.2 * Math.exp((17.67 * tempC) / (tempC + 243.5));
+  const Pv = (relHumidity / 100) * es;
+  const Pd = P - Pv;
   return (Pd / (Rd * T)) + (Pv / (Rv * T));
 }
 
-// Calculate bearing between two GPS points (degrees, 0=north, clockwise)
 function calcBearing(lat1, lon1, lat2, lon2) {
   const dLon = (lon2 - lon1) * Math.PI / 180;
   const la1 = lat1 * Math.PI / 180;
@@ -592,12 +585,48 @@ function calcBearing(lat1, lon1, lat2, lon2) {
   return ((Math.atan2(x, y) * 180 / Math.PI) + 360) % 360;
 }
 
-// Headwind component: positive = against you, negative = tailwind
 function calcHeadwind(windSpeedKmh, windFromDeg, travelBearingDeg) {
-  // Wind comes FROM windFromDeg, so it blows TOWARD (windFromDeg + 180)
-  // Headwind = wind speed * cos(angle between wind direction and travel direction)
   const angleDiff = (windFromDeg - travelBearingDeg) * Math.PI / 180;
   return windSpeedKmh * Math.cos(angleDiff);
+}
+
+// Slope via linear regression on (distance, altitude) — stable
+function calcSlopeRegression(points) {
+  const valid = points.filter(p => p.alt != null && p.dist != null);
+  if (valid.length < 3) return 0;
+  const totalDist = valid[valid.length - 1].dist - valid[0].dist;
+  if (totalDist < 20) return 0;
+  const n = valid.length;
+  let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+  for (const p of valid) {
+    sumX += p.dist; sumY += p.alt;
+    sumXY += p.dist * p.alt; sumX2 += p.dist * p.dist;
+  }
+  const denom = n * sumX2 - sumX * sumX;
+  if (Math.abs(denom) < 0.001) return 0;
+  const b = (n * sumXY - sumX * sumY) / denom;
+  return Math.max(-30, Math.min(30, b * 100));
+}
+
+// Device compass for heading
+function startCompass() {
+  if (window.DeviceOrientationEvent) {
+    if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+      DeviceOrientationEvent.requestPermission().then(state => {
+        if (state === 'granted') window.addEventListener('deviceorientation', onDeviceOrientation);
+      }).catch(() => {});
+    } else {
+      window.addEventListener('deviceorientation', onDeviceOrientation);
+    }
+  }
+}
+function onDeviceOrientation(e) {
+  if (e.webkitCompassHeading != null) deviceHeading = e.webkitCompassHeading;
+  else if (e.alpha != null && e.absolute) deviceHeading = (360 - e.alpha) % 360;
+}
+function stopCompass() {
+  window.removeEventListener('deviceorientation', onDeviceOrientation);
+  deviceHeading = null;
 }
 
 function populateProfileSelect() {
@@ -650,8 +679,14 @@ $('btn-live-watts').addEventListener('click', async () => {
 
 function startLiveWatts() {
   lwPoints = [];
+  lwFilteredWatts = 0;
+  lwFilteredSlope = 0;
+  lwPowerHistory = [];
   $('lw-status').textContent = 'Waiting for GPS speed…';
   $('lw-status').style.color = 'var(--green)';
+  let cumulativeDist = 0;
+
+  startCompass();
 
   lwWatchId = navigator.geolocation.watchPosition(
     pos => {
@@ -659,15 +694,17 @@ function startLiveWatts() {
       const alt = pos.coords.altitude;
       const lat = pos.coords.latitude;
       const lon = pos.coords.longitude;
-
       if (speed == null || speed < 0) return;
 
-      lwPoints.push({ alt, lat, lon });
-      // Keep last 10 points for slope + bearing
-      if (lwPoints.length > 10) lwPoints.shift();
+      // Cumulative distance
+      if (lwPoints.length > 0) {
+        const prev = lwPoints[lwPoints.length - 1];
+        cumulativeDist += haversine(prev.lat, prev.lon, lat, lon);
+      }
+      lwPoints.push({ alt, lat, lon, dist: cumulativeDist });
+      if (lwPoints.length > 30) lwPoints.shift();
 
-      const speedKmh = speed * 3.6;
-      $('lw-speed').textContent = speedKmh.toFixed(1);
+      $('lw-speed').textContent = (speed * 3.6).toFixed(1);
       if (alt != null) $('lw-alt').textContent = alt.toFixed(0);
 
       // Fetch wind on first point and every 60s
@@ -676,76 +713,72 @@ function startLiveWatts() {
         windFetchInterval = setInterval(() => fetchWind(lat, lon), 60000);
       }
 
-      // Calculate slope from recent points
-      let slopePct = 0;
-      if (lwPoints.length >= 2) {
-        const first = lwPoints[0];
-        const last = lwPoints[lwPoints.length - 1];
-        if (first.alt != null && last.alt != null) {
-          const dist = haversine(first.lat, first.lon, last.lat, last.lon);
-          if (dist > 2) {
-            slopePct = ((last.alt - first.alt) / dist) * 100;
-          }
-        }
-      }
+      // Slope: regression + EMA
+      const useSlope = $('lw-use-slope').checked;
+      let rawSlopePct = useSlope ? calcSlopeRegression(lwPoints) : 0;
+      lwFilteredSlope = lwFilteredSlope * (1 - EMA_ALPHA_SLOPE) + rawSlopePct * EMA_ALPHA_SLOPE;
+      const slopePct = useSlope ? lwFilteredSlope : 0;
       $('lw-slope').textContent = slopePct.toFixed(1);
       $('lw-slope').style.color = slopePct > 0.5 ? 'var(--highlight)' : slopePct < -0.5 ? 'var(--blue)' : 'var(--text)';
 
-      // Calculate travel bearing from last 2 points
-      let headwindKmh = 0;
-      if (lwPoints.length >= 2) {
+      // Heading: prefer compass, fallback GPS bearing
+      let heading = deviceHeading;
+      if (heading == null && lwPoints.length >= 2) {
         const prev = lwPoints[lwPoints.length - 2];
         const curr = lwPoints[lwPoints.length - 1];
-        const dist = haversine(prev.lat, prev.lon, curr.lat, curr.lon);
-        if (dist > 1) { // need some movement for bearing
-          const bearing = calcBearing(prev.lat, prev.lon, curr.lat, curr.lon);
-          headwindKmh = calcHeadwind(currentWind.speed, currentWind.direction, bearing);
+        if (haversine(prev.lat, prev.lon, curr.lat, curr.lon) > 2) {
+          heading = calcBearing(prev.lat, prev.lon, curr.lat, curr.lon);
         }
       }
-
-      // Update wind display
+      let headwindKmh = heading != null ? calcHeadwind(currentWind.speed, currentWind.direction, heading) : 0;
       $('lw-wind').textContent = headwindKmh.toFixed(0);
       $('lw-wind').style.color = headwindKmh > 2 ? 'var(--highlight)' : headwindKmh < -2 ? 'var(--green)' : 'var(--text)';
 
-      // Get selected profile
+      // Power calculation
       const history = loadHistory();
       const idx = parseInt($('lw-profile').value);
       if (isNaN(idx) || !history[idx]) return;
       const profile = history[idx];
-
       const m = parseFloat($('mass').value) || 80;
       const rho = parseFloat($('air-density').value) || 1.225;
       const g = 9.81;
       const Crr = parseFloat(profile.crr);
       const CdA = parseFloat(profile.cda);
-
-      const v = speed; // ground speed m/s
-      const vAir = v + (headwindKmh / 3.6); // air speed m/s
+      const v = speed;
+      const vAir = v + (headwindKmh / 3.6);
       const slope = slopePct / 100;
       const theta = Math.atan(slope);
 
       const pRoll = Crr * m * g * Math.cos(theta) * v;
       const pAero = 0.5 * rho * CdA * vAir * vAir * v;
       const pGrav = m * g * Math.sin(theta) * v;
-      const total = pRoll + pAero + pGrav;
+      const rawTotal = pRoll + pAero + pGrav;
 
-      $('lw-watts').textContent = Math.round(Math.max(0, total));
+      // EMA filter
+      if (lwFilteredWatts === 0 && rawTotal > 0) lwFilteredWatts = rawTotal;
+      else lwFilteredWatts = lwFilteredWatts * (1 - EMA_ALPHA_WATTS) + rawTotal * EMA_ALPHA_WATTS;
+      const displayWatts = Math.max(0, Math.round(lwFilteredWatts));
+
+      $('lw-watts').textContent = displayWatts;
       $('lw-w-roll').textContent = Math.round(pRoll) + ' W';
       $('lw-w-aero').textContent = Math.round(pAero) + ' W';
       $('lw-w-grav').textContent = Math.round(pGrav) + ' W';
-
       const maxP = Math.max(1, Math.abs(pRoll) + Math.abs(pAero) + Math.abs(pGrav));
       $('lw-bar-roll').style.width = Math.round((Math.abs(pRoll) / maxP) * 100) + '%';
       $('lw-bar-aero').style.width = Math.round((Math.abs(pAero) / maxP) * 100) + '%';
       $('lw-bar-grav').style.width = Math.round((Math.abs(pGrav) / maxP) * 100) + '%';
 
-      // Color watts
       const el = $('lw-watts');
-      if (total > 300) el.style.color = 'var(--highlight)';
-      else if (total > 150) el.style.color = 'var(--orange)';
+      if (displayWatts > 300) el.style.color = 'var(--highlight)';
+      else if (displayWatts > 150) el.style.color = 'var(--orange)';
       else el.style.color = 'var(--green)';
 
-      $('lw-status').textContent = `Live — wind ${currentWind.speed.toFixed(0)} km/h from ${currentWind.direction}° · ρ=${currentAirDensity.toFixed(3)} kg/m³`;
+      // Power history (60s rolling)
+      const now = Date.now();
+      lwPowerHistory.push({ t: now, w: displayWatts });
+      while (lwPowerHistory.length > 0 && (now - lwPowerHistory[0].t) > 60000) lwPowerHistory.shift();
+
+      $('lw-status').textContent = `Wind ${currentWind.speed.toFixed(0)} km/h · ρ=${currentAirDensity.toFixed(3)} · ${heading != null ? (deviceHeading != null ? '🧭' : '📍') : '—'}`;
     },
     err => {
       $('lw-status').textContent = 'GPS error: ' + err.message;
@@ -753,12 +786,86 @@ function startLiveWatts() {
     },
     { enableHighAccuracy: true, maximumAge: 0 }
   );
+
+  // Chart animation loop
+  function drawLwChart() {
+    const canvas = $('lw-chart');
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    const W = rect.width, H = rect.height;
+    const pad = { top: 8, right: 8, bottom: 18, left: 32 };
+
+    ctx.fillStyle = '#16213e';
+    ctx.fillRect(0, 0, W, H);
+
+    if (lwPowerHistory.length < 2) {
+      ctx.fillStyle = '#8899aa';
+      ctx.font = '11px -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('Power chart (last 60s)', W / 2, H / 2);
+      lwChartRAF = requestAnimationFrame(drawLwChart);
+      return;
+    }
+
+    const now = Date.now();
+    const tMin = now - 60000;
+    const wMax = Math.max(50, ...lwPowerHistory.map(p => p.w)) * 1.1;
+    const xScale = t => pad.left + ((t - tMin) / 60000) * (W - pad.left - pad.right);
+    const yScale = w => pad.top + (1 - w / wMax) * (H - pad.top - pad.bottom);
+
+    // Grid
+    ctx.strokeStyle = '#ffffff10';
+    ctx.lineWidth = 1;
+    for (let w = 0; w <= wMax; w += 50) {
+      const y = yScale(w);
+      ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke();
+      if (w % 100 === 0) {
+        ctx.fillStyle = '#8899aa'; ctx.font = '9px -apple-system, sans-serif';
+        ctx.textAlign = 'right'; ctx.fillText(w + '', pad.left - 3, y + 3);
+      }
+    }
+
+    // Power line
+    ctx.strokeStyle = '#00c897';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    let started = false;
+    for (const p of lwPowerHistory) {
+      const x = xScale(p.t), y = yScale(p.w);
+      if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    // Fill
+    const lastP = lwPowerHistory[lwPowerHistory.length - 1];
+    ctx.lineTo(xScale(lastP.t), yScale(0));
+    ctx.lineTo(xScale(lwPowerHistory[0].t), yScale(0));
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(0, 200, 151, 0.12)';
+    ctx.fill();
+
+    // Time labels
+    ctx.fillStyle = '#8899aa'; ctx.font = '9px -apple-system, sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('-60s', pad.left, H - 3);
+    ctx.fillText('-30s', (pad.left + W - pad.right) / 2, H - 3);
+    ctx.fillText('now', W - pad.right, H - 3);
+
+    lwChartRAF = requestAnimationFrame(drawLwChart);
+  }
+  lwChartRAF = requestAnimationFrame(drawLwChart);
 }
 
 function stopLiveWatts() {
   if (lwWatchId != null) navigator.geolocation.clearWatch(lwWatchId);
   lwWatchId = null;
   if (windFetchInterval) { clearInterval(windFetchInterval); windFetchInterval = null; }
+  if (lwChartRAF) { cancelAnimationFrame(lwChartRAF); lwChartRAF = null; }
+  stopCompass();
   showScreen('setup-screen');
 }
 

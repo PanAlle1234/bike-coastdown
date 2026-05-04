@@ -212,12 +212,18 @@
             <span class="pwr-param-value" id="lw-cda">—</span>
           </div>
         </div>
+        <label class="checkbox-label">
+          <input type="checkbox" id="lw-use-slope" checked>
+          Use GPS slope (uncheck if erratic)
+        </label>
       </div>
 
       <div class="live-display">
         <div class="big-number" id="lw-watts">0</div>
         <div class="unit">Watts</div>
       </div>
+
+      <canvas id="lw-chart" width="360" height="120"></canvas>
 
       <div class="live-metrics">
         <div class="metric">
