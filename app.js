@@ -518,6 +518,41 @@ if ('serviceWorker' in navigator) {
 // ── Live Watts ──
 let lwWatchId = null;
 let lwPoints = []; // for slope calculation
+let currentWind = { speed: 0, direction: 0 }; // wind speed km/h, direction degrees (from)
+let windFetchInterval = null;
+
+async function fetchWind(lat, lon) {
+  try {
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=wind_speed_10m,wind_direction_10m`;
+    const res = await fetch(url);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.current) {
+      currentWind.speed = data.current.wind_speed_10m || 0; // km/h
+      currentWind.direction = data.current.wind_direction_10m || 0; // degrees, where wind comes FROM
+    }
+  } catch (e) {
+    // Silently fail — wind just stays at last known value
+  }
+}
+
+// Calculate bearing between two GPS points (degrees, 0=north, clockwise)
+function calcBearing(lat1, lon1, lat2, lon2) {
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const la1 = lat1 * Math.PI / 180;
+  const la2 = lat2 * Math.PI / 180;
+  const x = Math.sin(dLon) * Math.cos(la2);
+  const y = Math.cos(la1) * Math.sin(la2) - Math.sin(la1) * Math.cos(la2) * Math.cos(dLon);
+  return ((Math.atan2(x, y) * 180 / Math.PI) + 360) % 360;
+}
+
+// Headwind component: positive = against you, negative = tailwind
+function calcHeadwind(windSpeedKmh, windFromDeg, travelBearingDeg) {
+  // Wind comes FROM windFromDeg, so it blows TOWARD (windFromDeg + 180)
+  // Headwind = wind speed * cos(angle between wind direction and travel direction)
+  const angleDiff = (windFromDeg - travelBearingDeg) * Math.PI / 180;
+  return windSpeedKmh * Math.cos(angleDiff);
+}
 
 function populateProfileSelect() {
   const sel = $('lw-profile');
@@ -582,12 +617,18 @@ function startLiveWatts() {
       if (speed == null || speed < 0) return;
 
       lwPoints.push({ alt, lat, lon });
-      // Keep last 10 points for slope
+      // Keep last 10 points for slope + bearing
       if (lwPoints.length > 10) lwPoints.shift();
 
       const speedKmh = speed * 3.6;
       $('lw-speed').textContent = speedKmh.toFixed(1);
       if (alt != null) $('lw-alt').textContent = alt.toFixed(0);
+
+      // Fetch wind on first point and every 60s
+      if (!windFetchInterval) {
+        fetchWind(lat, lon);
+        windFetchInterval = setInterval(() => fetchWind(lat, lon), 60000);
+      }
 
       // Calculate slope from recent points
       let slopePct = 0;
@@ -604,6 +645,22 @@ function startLiveWatts() {
       $('lw-slope').textContent = slopePct.toFixed(1);
       $('lw-slope').style.color = slopePct > 0.5 ? 'var(--highlight)' : slopePct < -0.5 ? 'var(--blue)' : 'var(--text)';
 
+      // Calculate travel bearing from last 2 points
+      let headwindKmh = 0;
+      if (lwPoints.length >= 2) {
+        const prev = lwPoints[lwPoints.length - 2];
+        const curr = lwPoints[lwPoints.length - 1];
+        const dist = haversine(prev.lat, prev.lon, curr.lat, curr.lon);
+        if (dist > 1) { // need some movement for bearing
+          const bearing = calcBearing(prev.lat, prev.lon, curr.lat, curr.lon);
+          headwindKmh = calcHeadwind(currentWind.speed, currentWind.direction, bearing);
+        }
+      }
+
+      // Update wind display
+      $('lw-wind').textContent = headwindKmh.toFixed(0);
+      $('lw-wind').style.color = headwindKmh > 2 ? 'var(--highlight)' : headwindKmh < -2 ? 'var(--green)' : 'var(--text)';
+
       // Get selected profile
       const history = loadHistory();
       const idx = parseInt($('lw-profile').value);
@@ -616,12 +673,13 @@ function startLiveWatts() {
       const Crr = parseFloat(profile.crr);
       const CdA = parseFloat(profile.cda);
 
-      const v = speed; // m/s
+      const v = speed; // ground speed m/s
+      const vAir = v + (headwindKmh / 3.6); // air speed m/s
       const slope = slopePct / 100;
       const theta = Math.atan(slope);
 
       const pRoll = Crr * m * g * Math.cos(theta) * v;
-      const pAero = 0.5 * rho * CdA * v * v * v;
+      const pAero = 0.5 * rho * CdA * vAir * vAir * v;
       const pGrav = m * g * Math.sin(theta) * v;
       const total = pRoll + pAero + pGrav;
 
@@ -641,7 +699,7 @@ function startLiveWatts() {
       else if (total > 150) el.style.color = 'var(--orange)';
       else el.style.color = 'var(--green)';
 
-      $('lw-status').textContent = 'Live — updating';
+      $('lw-status').textContent = `Live — wind ${currentWind.speed.toFixed(0)} km/h from ${currentWind.direction}°`;
     },
     err => {
       $('lw-status').textContent = 'GPS error: ' + err.message;
@@ -654,6 +712,7 @@ function startLiveWatts() {
 function stopLiveWatts() {
   if (lwWatchId != null) navigator.geolocation.clearWatch(lwWatchId);
   lwWatchId = null;
+  if (windFetchInterval) { clearInterval(windFetchInterval); windFetchInterval = null; }
   showScreen('setup-screen');
 }
 
