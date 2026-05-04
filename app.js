@@ -519,21 +519,50 @@ if ('serviceWorker' in navigator) {
 let lwWatchId = null;
 let lwPoints = []; // for slope calculation
 let currentWind = { speed: 0, direction: 0 }; // wind speed km/h, direction degrees (from)
+let currentAirDensity = 1.225; // default, updated from weather
 let windFetchInterval = null;
 
 async function fetchWind(lat, lon) {
   try {
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=wind_speed_10m,wind_direction_10m`;
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=wind_speed_10m,wind_direction_10m,temperature_2m,surface_pressure,relative_humidity_2m`;
     const res = await fetch(url);
     if (!res.ok) return;
     const data = await res.json();
     if (data.current) {
       currentWind.speed = data.current.wind_speed_10m || 0; // km/h
       currentWind.direction = data.current.wind_direction_10m || 0; // degrees, where wind comes FROM
+
+      // Compute air density from temperature, pressure, humidity
+      const tempC = data.current.temperature_2m; // °C
+      const pressHpa = data.current.surface_pressure; // hPa
+      const rh = data.current.relative_humidity_2m; // %
+
+      if (tempC != null && pressHpa != null) {
+        currentAirDensity = calcAirDensity(tempC, pressHpa, rh || 50);
+        // Update the input field so all calculations use it
+        $('air-density').value = currentAirDensity.toFixed(4);
+      }
     }
   } catch (e) {
-    // Silently fail — wind just stays at last known value
+    // Silently fail — values stay at last known
   }
+}
+
+// Air density from temperature, pressure, humidity (ideal gas law with humidity correction)
+// ρ = (Pd / (Rd * T)) + (Pv / (Rv * T))
+// Pd = dry air partial pressure, Pv = water vapor partial pressure
+function calcAirDensity(tempC, pressHpa, relHumidity) {
+  const T = tempC + 273.15; // Kelvin
+  const P = pressHpa * 100; // Pa
+  const Rd = 287.05; // specific gas constant dry air J/(kg·K)
+  const Rv = 461.495; // specific gas constant water vapor J/(kg·K)
+
+  // Saturation vapor pressure (Magnus formula)
+  const es = 611.2 * Math.exp((17.67 * tempC) / (tempC + 243.5)); // Pa
+  const Pv = (relHumidity / 100) * es; // actual vapor pressure
+  const Pd = P - Pv; // dry air pressure
+
+  return (Pd / (Rd * T)) + (Pv / (Rv * T));
 }
 
 // Calculate bearing between two GPS points (degrees, 0=north, clockwise)
@@ -699,7 +728,7 @@ function startLiveWatts() {
       else if (total > 150) el.style.color = 'var(--orange)';
       else el.style.color = 'var(--green)';
 
-      $('lw-status').textContent = `Live — wind ${currentWind.speed.toFixed(0)} km/h from ${currentWind.direction}°`;
+      $('lw-status').textContent = `Live — wind ${currentWind.speed.toFixed(0)} km/h from ${currentWind.direction}° · ρ=${currentAirDensity.toFixed(3)} kg/m³`;
     },
     err => {
       $('lw-status').textContent = 'GPS error: ' + err.message;
