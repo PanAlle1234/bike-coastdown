@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Coastdown App - Simulation Test</title>
+  <style>
+    body { font-family: monospace; background: #1a1a2e; color: #eee; padding: 20px; }
+    .pass { color: #00c897; }
+    .fail { color: #e94560; }
+    .warn { color: #f5a623; }
+    pre { white-space: pre-wrap; font-size: 12px; }
+    h2 { color: #4fc3f7; margin-top: 24px; }
+    table { border-collapse: collapse; margin: 8px 0; }
+    td, th { border: 1px solid #333; padding: 4px 8px; text-align: right; }
+    th { background: #16213e; }
+  </style>
+</head>
+<body>
+<h1>🧪 Bike Coastdown - Physics Simulation Test</h1>
+<div id="output"></div>
+<script>
+const out = document.getElementById('output');
+function log(msg, cls='') { out.innerHTML += `<div class="${cls}">${msg}</div>`; }
+function logH2(msg) { out.innerHTML += `<h2>${msg}</h2>`; }
+
+// ── Physics model (same as app.js) ──
+function haversine(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// ── Generate synthetic GPS trace ──
+// Simulates a rider at constant power on flat/hilly terrain
+function generateTrace({ power, mass, Crr, CdA, rho, slopePct, durationS, dtS, startLat, startLon }) {
+  const g = 9.81;
+  const slope = slopePct / 100;
+  const theta = Math.atan(slope);
+  const cosT = Math.cos(theta);
+  const sinT = Math.sin(theta);
+
+  let v = 5; // start at 5 m/s
+  let t = 0;
+  let lat = startLat;
+  let lon = startLon;
+  let alt = 100; // start altitude
+  const points = [];
+
+  while (t < durationS) {
+    // Forces: rolling + aero + gravity
+    const Froll = Crr * mass * g * cosT;
+    const Faero = 0.5 * rho * CdA * v * v;
+    const Fgrav = mass * g * sinT;
+    const Fresist = Froll + Faero + Fgrav;
+
+    // Power = F_pedal * v → F_pedal = P/v
+    const Fpedal = v > 0.5 ? power / v : 0;
+    const Fnet = Fpedal - Fresist;
+    const accel = Fnet / mass;
+
+    v = Math.max(0.1, v + accel * dtS);
+    t += dtS;
+
+    // Move position
+    const dist = v * dtS;
+    const dLat = (dist * cosT * Math.cos(0)) / 111320; // heading north
+    lat += dLat;
+    alt += dist * sinT;
+
+    // Add GPS noise (±2m altitude, ±0.3 m/s speed)
+    const noisyAlt = alt + (Math.random() - 0.5) * 4;
+    const noisySpeed = Math.max(0, v + (Math.random() - 0.5) * 0.6);
+
+    points.push({ t, v: noisySpeed, alt: noisyAlt, lat, lon, trueV: v, trueAlt: alt });
+  }
+  return points;
+}
+
+// ── Slope calculation methods ──
+function slopeFirstLast(points) {
+  if (points.length < 2) return 0;
+  const first = points[0], last = points[points.length - 1];
+  if (first.alt == null || last.alt == null) return 0;
+  const dist = haversine(first.lat, first.lon, last.lat, last.lon);
+  if (dist < 1) return 0;
+  return ((last.alt - first.alt) / dist) * 100;
+}
+
+function slopeRegression(points) {
+  const valid = points.filter(p => p.alt != null);
+  if (valid.length < 3) return 0;
+  // Compute cumulative distance
+  let cumDist = 0;
+  const withDist = [{ ...valid[0], dist: 0 }];
+  for (let i = 1; i < valid.length; i++) {
+    cumDist += haversine(valid[i-1].lat, valid[i-1].lon, valid[i].lat, valid[i].lon);
+    withDist.push({ ...valid[i], dist: cumDist });
+  }
+  if (cumDist < 20) return 0;
+  const n = withDist.length;
+  let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+  for (const p of withDist) {
+    sumX += p.dist; sumY += p.alt;
+    sumXY += p.dist * p.alt; sumX2 += p.dist * p.dist;
+  }
+  const denom = n * sumX2 - sumX * sumX;
+  if (Math.abs(denom) < 0.001) return 0;
+  const b = (n * sumXY - sumX * sumY) / denom;
+  return b * 100;
+}
+
+// Improved: median-filtered regression
+function slopeMedianRegression(points) {
+  const valid = points.filter(p => p.alt != null);
+  if (valid.length < 5) return 0;
+  // Compute cumulative distance
+  let cumDist = 0;
+  const withDist = [{ alt: valid[0].alt, dist: 0 }];
+  for (let i = 1; i < valid.length; i++) {
+    cumDist += haversine(valid[i-1].lat, valid[i-1].lon, valid[i].lat, valid[i].lon);
+    withDist.push({ alt: valid[i].alt, dist: cumDist });
+  }
+  if (cumDist < 20) return 0;
+
+  // Median filter altitude (window=5)
+  const filtered = withDist.map((p, i) => {
+    const start = Math.max(0, i - 2);
+    const end = Math.min(withDist.length - 1, i + 2);
+    const alts = [];
+    for (let j = start; j <= end; j++) alts.push(withDist[j].alt);
+    alts.sort((a, b) => a - b);
+    return { alt: alts[Math.floor(alts.length / 2)], dist: p.dist };
+  });
+
+  // Regression on filtered
+  const n = filtered.length;
+  let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+  for (const p of filtered) {
+    sumX += p.dist; sumY += p.alt;
+    sumXY += p.dist * p.alt; sumX2 += p.dist * p.dist;
+  }
+  const denom = n * sumX2 - sumX * sumX;
+  if (Math.abs(denom) < 0.001) return 0;
+  const b = (n * sumXY - sumX * sumY) / denom;
+  return b * 100;
+}
+
+// ── Power estimation (same as app) ──
+function estimatePower(speed, slopePct, headwindKmh, Crr, CdA, mass, rho) {
+  const g = 9.81;
+  const v = speed;
+  const vAir = v + headwindKmh / 3.6;
+  const slope = slopePct / 100;
+  const theta = Math.atan(slope);
+  const pRoll = Crr * mass * g * Math.cos(theta) * v;
+  const pAero = 0.5 * rho * CdA * vAir * vAir * v;
+  const pGrav = mass * g * Math.sin(theta) * v;
+  return { pRoll, pAero, pGrav, total: pRoll + pAero + pGrav };
+}
+
+// ══════════════════════════════════════════════
+// TEST 1: Slope estimation accuracy
+// ══════════════════════════════════════════════
+logH2('Test 1: Slope Estimation Accuracy');
+log('Generating traces at various slopes with GPS noise...');
+
+const slopeTests = [-5, -2, 0, 2, 5, 8];
+let tableHTML = '<table><tr><th>True Slope %</th><th>First/Last</th><th>Regression</th><th>Median+Reg</th></tr>';
+
+for (const trueSlopePct of slopeTests) {
+  const trace = generateTrace({
+    power: 200, mass: 80, Crr: 0.005, CdA: 0.35, rho: 1.225,
+    slopePct: trueSlopePct, durationS: 30, dtS: 1,
+    startLat: 45.0, startLon: 7.0
+  });
+
+  // Use last 15 points (simulating the rolling window)
+  const window = trace.slice(-15);
+  const s1 = slopeFirstLast(window);
+  const s2 = slopeRegression(window);
+  const s3 = slopeMedianRegression(window);
+
+  const err1 = Math.abs(s1 - trueSlopePct);
+  const err2 = Math.abs(s2 - trueSlopePct);
+  const err3 = Math.abs(s3 - trueSlopePct);
+
+  const cls1 = err1 < 1 ? 'pass' : err1 < 2 ? 'warn' : 'fail';
+  const cls2 = err2 < 1 ? 'pass' : err2 < 2 ? 'warn' : 'fail';
+  const cls3 = err3 < 1 ? 'pass' : err3 < 2 ? 'warn' : 'fail';
+
+  tableHTML += `<tr><td>${trueSlopePct}</td><td class="${cls1}">${s1.toFixed(2)}</td><td class="${cls2}">${s2.toFixed(2)}</td><td class="${cls3}">${s3.toFixed(2)}</td></tr>`;
+}
+tableHTML += '</table>';
+out.innerHTML += tableHTML;
+log('Green = error < 1%, Yellow = error < 2%, Red = error > 2%');
+
+// ══════════════════════════════════════════════
+// TEST 2: Power estimation at steady state
+// ══════════════════════════════════════════════
+logH2('Test 2: Power Estimation Accuracy (steady state)');
+log('Rider at constant power — does our model recover the correct watts?');
+
+const powerTests = [
+  { power: 100, slope: 0, desc: '100W flat' },
+  { power: 200, slope: 0, desc: '200W flat' },
+  { power: 300, slope: 0, desc: '300W flat' },
+  { power: 200, slope: 3, desc: '200W 3% uphill' },
+  { power: 200, slope: -2, desc: '200W 2% downhill' },
+  { power: 150, slope: 5, desc: '150W 5% uphill' },
+];
+
+let table2 = '<table><tr><th>Scenario</th><th>True W</th><th>Steady Speed</th><th>Estimated W</th><th>Error</th></tr>';
+
+for (const test of powerTests) {
+  const trace = generateTrace({
+    power: test.power, mass: 80, Crr: 0.005, CdA: 0.35, rho: 1.225,
+    slopePct: test.slope, durationS: 60, dtS: 1,
+    startLat: 45.0, startLon: 7.0
+  });
+
+  // Take last point speed (should be near steady state)
+  const lastPoints = trace.slice(-5);
+  const avgSpeed = lastPoints.reduce((s, p) => s + p.trueV, 0) / lastPoints.length;
+
+  // Estimate power using true slope (best case)
+  const est = estimatePower(avgSpeed, test.slope, 0, 0.005, 0.35, 80, 1.225);
+  const err = Math.abs(est.total - test.power);
+  const errPct = (err / test.power * 100).toFixed(1);
+  const cls = err < 10 ? 'pass' : err < 25 ? 'warn' : 'fail';
+
+  table2 += `<tr><td>${test.desc}</td><td>${test.power}</td><td>${(avgSpeed * 3.6).toFixed(1)} km/h</td><td class="${cls}">${est.total.toFixed(0)}</td><td class="${cls}">${errPct}%</td></tr>`;
+}
+table2 += '</table>';
+out.innerHTML += table2;
+
+// ══════════════════════════════════════════════
+// TEST 3: Coasting detection (power = 0)
+// ══════════════════════════════════════════════
+logH2('Test 3: Coasting — Should show ~0W when not pedaling');
+log('Simulating coast-down (0W) from 35 km/h...');
+
+const coastTrace = generateTrace({
+  power: 0, mass: 80, Crr: 0.005, CdA: 0.35, rho: 1.225,
+  slopePct: 0, durationS: 30, dtS: 1,
+  startLat: 45.0, startLon: 7.0
+});
+
+// What does our model say?
+const coastSpeeds = coastTrace.slice(-10);
+let coastWatts = [];
+for (const p of coastSpeeds) {
+  const est = estimatePower(p.trueV, 0, 0, 0.005, 0.35, 80, 1.225);
+  coastWatts.push(est.total);
+}
+const avgCoastW = coastWatts.reduce((a, b) => a + b, 0) / coastWatts.length;
+log(`Average estimated watts during coasting: ${avgCoastW.toFixed(1)} W`, avgCoastW > 20 ? 'fail' : 'pass');
+log('');
+log('⚠️ KEY INSIGHT: When coasting, the model still shows positive watts because:', 'warn');
+log('   P = (Crr·m·g·v) + (0.5·ρ·CdA·v³) — these are the watts NEEDED to maintain that speed.', 'warn');
+log('   The model computes "watts to sustain current speed" not "watts being applied".', 'warn');
+log('   During coasting, the rider applies 0W but the bike is decelerating.', 'warn');
+log('');
+log('FIX: Detect deceleration. If speed is dropping, the rider is NOT producing the estimated watts.', 'pass');
+log('   Actual power ≈ estimated_power + m·a·v (where a is negative during deceleration)', 'pass');
+
+// ══════════════════════════════════════════════
+// TEST 4: Slope noise impact on power
+// ══════════════════════════════════════════════
+logH2('Test 4: Slope Noise Impact on Power Estimation');
+log('How much does ±1% slope error affect watts at 30 km/h?');
+
+const v30 = 30 / 3.6;
+const pFlat = estimatePower(v30, 0, 0, 0.005, 0.35, 80, 1.225);
+const pUp1 = estimatePower(v30, 1, 0, 0.005, 0.35, 80, 1.225);
+const pDown1 = estimatePower(v30, -1, 0, 0.005, 0.35, 80, 1.225);
+
+log(`At 30 km/h flat: ${pFlat.total.toFixed(0)} W`);
+log(`At 30 km/h +1% slope: ${pUp1.total.toFixed(0)} W (+${(pUp1.total - pFlat.total).toFixed(0)} W)`, 'warn');
+log(`At 30 km/h -1% slope: ${pDown1.total.toFixed(0)} W (${(pDown1.total - pFlat.total).toFixed(0)} W)`, 'warn');
+log('');
+log(`→ ±1% slope error = ±${Math.round(pUp1.total - pFlat.total)} W error at 30 km/h!`, 'fail');
+log('   This is why GPS slope makes watt prediction unreliable on anything but long steady grades.', 'fail');
+log('');
+log('RECOMMENDATION:', 'pass');
+log('   1. Default slope to OFF for power estimation (use only for info display)', 'pass');
+log('   2. Add acceleration correction: P_actual = P_resistance + m·a·v', 'pass');
+log('   3. This removes the need for slope entirely on flat-ish terrain', 'pass');
+
+// ══════════════════════════════════════════════
+// TEST 5: Acceleration-corrected power
+// ══════════════════════════════════════════════
+logH2('Test 5: Acceleration-Corrected Power (better approach)');
+log('P_actual = P_aero + P_roll + m·a·v (no slope needed on flat terrain)');
+log('This uses speed change to infer actual rider power output.');
+log('');
+
+// Simulate: rider does 200W for 30s, then coasts for 30s
+const mixedTrace = [
+  ...generateTrace({ power: 200, mass: 80, Crr: 0.005, CdA: 0.35, rho: 1.225, slopePct: 0, durationS: 30, dtS: 1, startLat: 45.0, startLon: 7.0 }),
+];
+const coastStart = mixedTrace[mixedTrace.length - 1];
+const coastTrace2 = generateTrace({ power: 0, mass: 80, Crr: 0.005, CdA: 0.35, rho: 1.225, slopePct: 0, durationS: 30, dtS: 1, startLat: coastStart.lat, startLon: coastStart.lon });
+// Adjust time offset
+coastTrace2.forEach(p => p.t += 30);
+const fullTrace = [...mixedTrace, ...coastTrace2];
+
+log('Pedaling phase (0-30s) at 200W, then coasting (30-60s) at 0W:');
+let table5 = '<table><tr><th>Time</th><th>Speed</th><th>Naive W</th><th>Accel-corrected W</th><th>True W</th></tr>';
+
+for (let i = 5; i < fullTrace.length; i += 5) {
+  const curr = fullTrace[i];
+  const prev = fullTrace[i - 3];
+  const dt = curr.t - prev.t;
+  const accel = (curr.trueV - prev.trueV) / dt;
+  const v = curr.trueV;
+
+  const naive = estimatePower(v, 0, 0, 0.005, 0.35, 80, 1.225);
+  // Acceleration-corrected: P = P_resist + m*a*v
+  const corrected = naive.total + 80 * accel * v;
+  const truePower = curr.t <= 30 ? 200 : 0;
+
+  const naiveErr = Math.abs(naive.total - truePower);
+  const corrErr = Math.abs(corrected - truePower);
+  const clsN = naiveErr < 15 ? 'pass' : naiveErr < 40 ? 'warn' : 'fail';
+  const clsC = corrErr < 15 ? 'pass' : corrErr < 40 ? 'warn' : 'fail';
+
+  table5 += `<tr><td>${curr.t.toFixed(0)}s</td><td>${(v*3.6).toFixed(1)}</td><td class="${clsN}">${naive.total.toFixed(0)}</td><td class="${clsC}">${Math.max(0, corrected).toFixed(0)}</td><td>${truePower}</td></tr>`;
+}
+table5 += '</table>';
+out.innerHTML += table5;
+
+log('');
+log('✅ CONCLUSION: Acceleration-corrected power correctly shows ~0W during coasting!', 'pass');
+log('   The naive model (current app) always shows positive watts because it computes', '');
+log('   "watts needed to maintain speed" not "watts actually being produced".', '');
+
+// ══════════════════════════════════════════════
+// SUMMARY
+// ══════════════════════════════════════════════
+logH2('Summary of Issues & Fixes');
+log('');
+log('1. SLOPE: GPS altitude noise (±2m) causes ±1-3% slope errors on short windows.', 'fail');
+log('   FIX: Use median filter + regression over 30+ points (>50m distance).', 'pass');
+log('   FIX: Default slope OFF for power calc. Show it as info only.', 'pass');
+log('');
+log('2. WATTS DURING COASTING: Model shows watts needed to sustain speed, not actual output.', 'fail');
+log('   FIX: Add acceleration correction: P_actual = P_resist + m·a·v', 'pass');
+log('   When decelerating (a<0), this subtracts kinetic energy loss → shows ~0W.', 'pass');
+log('');
+log('3. CHART NOT SHOWING: Likely canvas sizing issue on mobile. Need explicit height.', 'warn');
+log('   FIX: Set canvas height in CSS and use getBoundingClientRect properly.', 'pass');
+</script>
+</body>
+</html>

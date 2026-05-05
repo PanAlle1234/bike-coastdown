@@ -543,8 +543,10 @@ let lwFilteredSlope = 0;
 let lwPowerHistory = []; // { t, w }
 let lwChartRAF = null;
 let deviceHeading = null;
-const EMA_ALPHA_WATTS = 0.15;
-const EMA_ALPHA_SLOPE = 0.2;
+let lwPrevSpeed = null; // for acceleration correction
+let lwPrevTime = null;
+const EMA_ALPHA_WATTS = 0.12;
+const EMA_ALPHA_SLOPE = 0.15;
 
 async function fetchWind(lat, lon) {
   try {
@@ -590,15 +592,27 @@ function calcHeadwind(windSpeedKmh, windFromDeg, travelBearingDeg) {
   return windSpeedKmh * Math.cos(angleDiff);
 }
 
-// Slope via linear regression on (distance, altitude) — stable
+// Slope via median-filtered linear regression — much more stable
 function calcSlopeRegression(points) {
   const valid = points.filter(p => p.alt != null && p.dist != null);
-  if (valid.length < 3) return 0;
+  if (valid.length < 5) return 0;
   const totalDist = valid[valid.length - 1].dist - valid[0].dist;
-  if (totalDist < 20) return 0;
-  const n = valid.length;
+  if (totalDist < 30) return 0; // need 30m minimum
+
+  // Median filter altitude (window=5) to remove spikes
+  const filtered = valid.map((p, i) => {
+    const start = Math.max(0, i - 2);
+    const end = Math.min(valid.length - 1, i + 2);
+    const alts = [];
+    for (let j = start; j <= end; j++) alts.push(valid[j].alt);
+    alts.sort((a, b) => a - b);
+    return { alt: alts[Math.floor(alts.length / 2)], dist: p.dist };
+  });
+
+  // Linear regression on filtered data
+  const n = filtered.length;
   let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
-  for (const p of valid) {
+  for (const p of filtered) {
     sumX += p.dist; sumY += p.alt;
     sumXY += p.dist * p.alt; sumX2 += p.dist * p.dist;
   }
@@ -682,6 +696,8 @@ function startLiveWatts() {
   lwFilteredWatts = 0;
   lwFilteredSlope = 0;
   lwPowerHistory = [];
+  lwPrevSpeed = null;
+  lwPrevTime = null;
   $('lw-status').textContent = 'Waiting for GPS speed…';
   $('lw-status').style.color = 'var(--green)';
   let cumulativeDist = 0;
@@ -702,7 +718,7 @@ function startLiveWatts() {
         cumulativeDist += haversine(prev.lat, prev.lon, lat, lon);
       }
       lwPoints.push({ alt, lat, lon, dist: cumulativeDist });
-      if (lwPoints.length > 30) lwPoints.shift();
+      if (lwPoints.length > 40) lwPoints.shift();
 
       $('lw-speed').textContent = (speed * 3.6).toFixed(1);
       if (alt != null) $('lw-alt').textContent = alt.toFixed(0);
@@ -752,7 +768,23 @@ function startLiveWatts() {
       const pRoll = Crr * m * g * Math.cos(theta) * v;
       const pAero = 0.5 * rho * CdA * vAir * vAir * v;
       const pGrav = m * g * Math.sin(theta) * v;
-      const rawTotal = pRoll + pAero + pGrav;
+      const pResist = pRoll + pAero + pGrav;
+
+      // Acceleration correction: P_actual = P_resistance + m·a·v
+      // When coasting (decelerating), a<0 → shows ~0W correctly
+      let accelCorr = 0;
+      const nowMs = performance.now() / 1000;
+      if (lwPrevSpeed != null && lwPrevTime != null) {
+        const dt = nowMs - lwPrevTime;
+        if (dt > 0.3 && dt < 5) {
+          const accel = (speed - lwPrevSpeed) / dt;
+          accelCorr = m * accel * v;
+        }
+      }
+      lwPrevSpeed = speed;
+      lwPrevTime = nowMs;
+
+      const rawTotal = pResist + accelCorr;
 
       // EMA filter
       if (lwFilteredWatts === 0 && rawTotal > 0) lwFilteredWatts = rawTotal;
@@ -790,9 +822,13 @@ function startLiveWatts() {
   // Chart animation loop
   function drawLwChart() {
     const canvas = $('lw-chart');
-    if (!canvas) return;
+    if (!canvas) { lwChartRAF = requestAnimationFrame(drawLwChart); return; }
     const dpr = window.devicePixelRatio || 1;
     const rect = canvas.getBoundingClientRect();
+    if (rect.width < 10 || rect.height < 10) {
+      lwChartRAF = requestAnimationFrame(drawLwChart);
+      return;
+    }
     canvas.width = rect.width * dpr;
     canvas.height = rect.height * dpr;
     const ctx = canvas.getContext('2d');

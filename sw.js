@@ -1,4 +1,4 @@
-const CACHE = 'coastdown-v10';
+const CACHE = 'coastdown-v11';
 const ASSETS = ['/', 'index.html', 'styles.css', 'app.js', 'manifest.json'];
 
 self.addEventListener('install', e => {
