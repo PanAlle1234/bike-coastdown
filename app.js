@@ -597,7 +597,7 @@ function calcSlopeRegression(points) {
   const valid = points.filter(p => p.alt != null && p.dist != null);
   if (valid.length < 5) return 0;
   const totalDist = valid[valid.length - 1].dist - valid[0].dist;
-  if (totalDist < 30) return 0; // need 30m minimum
+  if (totalDist < 50) return 0; // need 50m minimum for stable slope
 
   // Median filter altitude (window=5) to remove spikes
   const filtered = valid.map((p, i) => {
@@ -729,11 +729,24 @@ function startLiveWatts() {
         windFetchInterval = setInterval(() => fetchWind(lat, lon), 60000);
       }
 
-      // Slope: regression + EMA
-      const useSlope = $('lw-use-slope').checked;
-      let rawSlopePct = useSlope ? calcSlopeRegression(lwPoints) : 0;
-      lwFilteredSlope = lwFilteredSlope * (1 - EMA_ALPHA_SLOPE) + rawSlopePct * EMA_ALPHA_SLOPE;
-      const slopePct = useSlope ? lwFilteredSlope : 0;
+      // Slope: mode-based filtering
+      const slopeMode = $('lw-slope-mode').value;
+      const useSlope = $('lw-use-slope').checked && slopeMode !== 'off';
+      let rawSlopePct = 0;
+      let slopeAlpha = EMA_ALPHA_SLOPE;
+
+      if (useSlope) {
+        rawSlopePct = calcSlopeRegression(lwPoints);
+        // Adjust EMA based on mode
+        switch (slopeMode) {
+          case 'heavy': slopeAlpha = 0.05; break;  // very slow, very stable
+          case 'medium': slopeAlpha = 0.12; break; // balanced
+          case 'light': slopeAlpha = 0.25; break;  // responsive but noisy
+        }
+      }
+      lwFilteredSlope = lwFilteredSlope * (1 - slopeAlpha) + rawSlopePct * slopeAlpha;
+      // Dead zone: treat tiny slopes as flat (GPS noise floor)
+      const slopePct = (useSlope && Math.abs(lwFilteredSlope) > 0.3) ? lwFilteredSlope : 0;
       $('lw-slope').textContent = slopePct.toFixed(1);
       $('lw-slope').style.color = slopePct > 0.5 ? 'var(--highlight)' : slopePct < -0.5 ? 'var(--blue)' : 'var(--text)';
 
@@ -773,12 +786,13 @@ function startLiveWatts() {
       // Acceleration correction: P_actual = P_resistance + m·a·v
       // When coasting (decelerating), a<0 → shows ~0W correctly
       let accelCorr = 0;
+      let measuredAccel = 0;
       const nowMs = performance.now() / 1000;
       if (lwPrevSpeed != null && lwPrevTime != null) {
         const dt = nowMs - lwPrevTime;
         if (dt > 0.3 && dt < 5) {
-          const accel = (speed - lwPrevSpeed) / dt;
-          accelCorr = m * accel * v;
+          measuredAccel = (speed - lwPrevSpeed) / dt;
+          accelCorr = m * measuredAccel * v;
         }
       }
       lwPrevSpeed = speed;
@@ -786,9 +800,24 @@ function startLiveWatts() {
 
       const rawTotal = pResist + accelCorr;
 
-      // EMA filter
+      // Adaptive EMA: fast decay when power drops, slow rise when power increases
+      // This makes watts go to zero quickly when you stop pedaling
+      let alpha = EMA_ALPHA_WATTS;
+      if (rawTotal < lwFilteredWatts) {
+        // Decaying — use faster alpha so it drops quickly
+        alpha = 0.4;
+      }
+      if (rawTotal <= 0) {
+        // Clearly coasting — snap toward zero fast
+        alpha = 0.6;
+      }
+
       if (lwFilteredWatts === 0 && rawTotal > 0) lwFilteredWatts = rawTotal;
-      else lwFilteredWatts = lwFilteredWatts * (1 - EMA_ALPHA_WATTS) + rawTotal * EMA_ALPHA_WATTS;
+      else lwFilteredWatts = lwFilteredWatts * (1 - alpha) + Math.max(0, rawTotal) * alpha;
+
+      // Hard floor: if raw is negative for a while, force to zero
+      if (rawTotal <= 0) lwFilteredWatts = Math.max(0, lwFilteredWatts * 0.5);
+
       const displayWatts = Math.max(0, Math.round(lwFilteredWatts));
 
       $('lw-watts').textContent = displayWatts;

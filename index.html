@@ -216,6 +216,15 @@
           <input type="checkbox" id="lw-use-slope">
           Use GPS slope (experimental — noisy on short rides)
         </label>
+        <label>
+          Slope filter strength
+          <select id="lw-slope-mode">
+            <option value="off">Off (flat assumed)</option>
+            <option value="heavy">Heavy (best for short rides, slow response)</option>
+            <option value="medium" selected>Medium (balanced)</option>
+            <option value="light">Light (fast response, more noise)</option>
+          </select>
+        </label>
       </div>
 
       <div class="live-display">
