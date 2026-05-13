@@ -23,18 +23,43 @@ function setPhase(newPhase, text) {
 }
 
 // ── Slope calculation from GPS altitude + distance ──
-function calcSlope(points) {
-  if (points.length < 2) return 0;
-  const last = points[points.length - 1];
-  // Look back ~3 points for smoothing
-  const lookback = Math.max(0, points.length - 4);
-  const prev = points[lookback];
-  if (last.alt == null || prev.alt == null) return 0;
+// Uses median-filtered regression (shared with live watts)
+function calcSlopeRecording(points) {
+  if (points.length < 5) return 0;
+  // Compute cumulative distance for last N points
+  const window = points.slice(-20); // last 20 points
+  if (window.length < 5) return 0;
 
-  const dAlt = last.alt - prev.alt;
-  const dist = haversine(prev.lat, prev.lon, last.lat, last.lon);
-  if (dist < 1) return 0; // need at least 1m
-  return (dAlt / dist) * 100; // percent
+  let cumDist = 0;
+  const withDist = [{ alt: window[0].alt, dist: 0 }];
+  for (let i = 1; i < window.length; i++) {
+    cumDist += haversine(window[i-1].lat, window[i-1].lon, window[i].lat, window[i].lon);
+    withDist.push({ alt: window[i].alt, dist: cumDist });
+  }
+
+  const valid = withDist.filter(p => p.alt != null);
+  if (valid.length < 5 || cumDist < 30) return 0;
+
+  // Median filter (window=5)
+  const filtered = valid.map((p, i) => {
+    const start = Math.max(0, i - 2);
+    const end = Math.min(valid.length - 1, i + 2);
+    const alts = [];
+    for (let j = start; j <= end; j++) alts.push(valid[j].alt);
+    alts.sort((a, b) => a - b);
+    return { alt: alts[Math.floor(alts.length / 2)], dist: p.dist };
+  });
+
+  const n = filtered.length;
+  let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+  for (const p of filtered) {
+    sumX += p.dist; sumY += p.alt;
+    sumXY += p.dist * p.alt; sumX2 += p.dist * p.dist;
+  }
+  const denom = n * sumX2 - sumX * sumX;
+  if (Math.abs(denom) < 0.001) return 0;
+  const b = (n * sumXY - sumX * sumY) / denom;
+  return Math.max(-30, Math.min(30, b * 100));
 }
 
 function haversine(lat1, lon1, lat2, lon2) {
@@ -123,7 +148,7 @@ function beginRecording() {
       $('live-accel').style.color = accel >= 0 ? 'var(--orange)' : 'var(--green)';
 
       // Calculate slope
-      const slope = calcSlope(dataPoints);
+      const slope = calcSlopeRecording(dataPoints);
       $('live-slope').textContent = slope.toFixed(1);
       $('live-slope').style.color = slope > 0.5 ? 'var(--highlight)' : slope < -0.5 ? 'var(--blue)' : 'var(--text)';
 
@@ -698,6 +723,7 @@ function startLiveWatts() {
   lwPowerHistory = [];
   lwPrevSpeed = null;
   lwPrevTime = null;
+  window._lwSpeedHist = [];
   $('lw-status').textContent = 'Waiting for GPS speed…';
   $('lw-status').style.color = 'var(--green)';
   let cumulativeDist = 0;
@@ -783,40 +809,52 @@ function startLiveWatts() {
       const pGrav = m * g * Math.sin(theta) * v;
       const pResist = pRoll + pAero + pGrav;
 
-      // Acceleration correction: P_actual = P_resistance + m·a·v
-      // When coasting (decelerating), a<0 → shows ~0W correctly
+      // ── Acceleration-corrected power ──
+      // P_rider = P_resistance + m·a·v
+      // When coasting: a < 0, so P_rider ≈ 0
+      // Use smoothed acceleration from speed history
       let accelCorr = 0;
-      let measuredAccel = 0;
       const nowMs = performance.now() / 1000;
-      if (lwPrevSpeed != null && lwPrevTime != null) {
-        const dt = nowMs - lwPrevTime;
-        if (dt > 0.3 && dt < 5) {
-          measuredAccel = (speed - lwPrevSpeed) / dt;
-          accelCorr = m * measuredAccel * v;
+
+      // Store speed history for robust acceleration estimate
+      if (!window._lwSpeedHist) window._lwSpeedHist = [];
+      window._lwSpeedHist.push({ t: nowMs, v: speed });
+      // Keep last 5 seconds
+      while (window._lwSpeedHist.length > 1 && (nowMs - window._lwSpeedHist[0].t) > 5) {
+        window._lwSpeedHist.shift();
+      }
+
+      // Compute acceleration from linear regression on speed history (much smoother)
+      if (window._lwSpeedHist.length >= 3) {
+        const pts = window._lwSpeedHist;
+        const n2 = pts.length;
+        let st = 0, sv = 0, stv = 0, st2 = 0;
+        for (const p of pts) { st += p.t; sv += p.v; stv += p.t * p.v; st2 += p.t * p.t; }
+        const den = n2 * st2 - st * st;
+        if (Math.abs(den) > 0.001) {
+          const accel = (n2 * stv - st * sv) / den; // slope of speed vs time = acceleration
+          accelCorr = m * accel * v;
         }
       }
-      lwPrevSpeed = speed;
-      lwPrevTime = nowMs;
 
       const rawTotal = pResist + accelCorr;
 
-      // Adaptive EMA: fast decay when power drops, slow rise when power increases
-      // This makes watts go to zero quickly when you stop pedaling
-      let alpha = EMA_ALPHA_WATTS;
-      if (rawTotal < lwFilteredWatts) {
-        // Decaying — use faster alpha so it drops quickly
-        alpha = 0.4;
+      // ── Adaptive filter with fast zero-snap ──
+      // When raw power is clearly zero or negative, snap to zero immediately
+      let filteredRaw = Math.max(0, rawTotal);
+      if (rawTotal < 5) {
+        // Coasting or very low power — go to zero fast
+        lwFilteredWatts = lwFilteredWatts * 0.3; // decay 70% per update
+        if (lwFilteredWatts < 3) lwFilteredWatts = 0;
+      } else if (rawTotal < lwFilteredWatts * 0.5) {
+        // Power dropped significantly — fast decay
+        lwFilteredWatts = lwFilteredWatts * 0.5 + filteredRaw * 0.5;
+      } else {
+        // Normal: smooth rise
+        const alpha = EMA_ALPHA_WATTS;
+        if (lwFilteredWatts === 0) lwFilteredWatts = filteredRaw;
+        else lwFilteredWatts = lwFilteredWatts * (1 - alpha) + filteredRaw * alpha;
       }
-      if (rawTotal <= 0) {
-        // Clearly coasting — snap toward zero fast
-        alpha = 0.6;
-      }
-
-      if (lwFilteredWatts === 0 && rawTotal > 0) lwFilteredWatts = rawTotal;
-      else lwFilteredWatts = lwFilteredWatts * (1 - alpha) + Math.max(0, rawTotal) * alpha;
-
-      // Hard floor: if raw is negative for a while, force to zero
-      if (rawTotal <= 0) lwFilteredWatts = Math.max(0, lwFilteredWatts * 0.5);
 
       const displayWatts = Math.max(0, Math.round(lwFilteredWatts));
 
